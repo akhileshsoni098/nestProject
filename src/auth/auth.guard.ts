@@ -1,16 +1,18 @@
 import {
   Injectable,
-  NestMiddleware,
+  CanActivate,
+  ExecutionContext,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { Request, Response, NextFunction } from 'express';
+import { Request } from 'express';
 
 @Injectable()
-export class AuthMiddleware implements NestMiddleware {
+export class AuthGuard implements CanActivate {
   constructor(private readonly jwtService: JwtService) {}
 
-  use(req: Request, _res: Response, next: NextFunction) {
+  canActivate(context: ExecutionContext): boolean {
+    const req = context.switchToHttp().getRequest<Request>();
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -22,7 +24,7 @@ export class AuthMiddleware implements NestMiddleware {
     try {
       const decoded = this.jwtService.verify<{ id: number }>(token);
       req.user = decoded;
-      next();
+      return true;
     } catch {
       throw new UnauthorizedException('Invalid or expired token');
     }

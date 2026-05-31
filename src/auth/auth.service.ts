@@ -26,7 +26,7 @@ export class AuthService {
       createUserDto.role = dto.role;
 
       const user = await this.usersService.create(createUserDto);
-
+ 
       const token = this.jwtService.sign({ id: user.id });
 
       const { password: _, ...userWithoutPassword } = user;
@@ -70,18 +70,4 @@ export class AuthService {
     }
   }
 
-  async profile(userId: number) {
-    try {
-      const user = await this.usersService.findOne(userId);
-
-      const { password: _, ...userWithoutPassword } = user;
-
-      return userWithoutPassword;
-    } catch (error: unknown) {
-      if (error instanceof UnauthorizedException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to fetch profile');
-    }
-  }
 }

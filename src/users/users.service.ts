@@ -9,8 +9,6 @@ import { eq } from 'drizzle-orm';
 import { DatabaseService } from '../db/database.service';
 import { users } from './schema';
 import { CreateUserDto } from './dto/create-user.dto';
-import { UpdateUserDto } from './dto/update-user.dto';
-
 @Injectable()
 export class UsersService {
   constructor(private readonly database: DatabaseService) {}
@@ -73,12 +71,10 @@ export class UsersService {
     }
   }
 
-  async findAll() {
-    try {
-      return await this.database.db.select().from(users).orderBy(users.id);
-    } catch {
-      throw new InternalServerErrorException('Failed to fetch users');
-    }
+  async profile(userId: number) {
+    const user = await this.findOne(userId);
+    const { password: _, ...userWithoutPassword } = user;
+    return userWithoutPassword;
   }
 
   async findOne(id: number) {
@@ -99,60 +95,6 @@ export class UsersService {
         throw error;
       }
       throw new InternalServerErrorException('Failed to find user');
-    }
-  }
-
-  async update(id: number, dto: UpdateUserDto) {
-    try {
-      const payload: Partial<typeof users.$inferInsert> = {};
-
-      if (dto.fname !== undefined) payload.fname = dto.fname;
-      if (dto.lname !== undefined) payload.lname = dto.lname;
-      if (dto.email !== undefined) payload.email = dto.email;
-
-      if (Object.keys(payload).length === 0) {
-        return this.findOne(id);
-      }
-
-      const [updated] = await this.database.db
-        .update(users)
-        .set({
-          ...payload,
-          updatedAt: new Date(),
-        })
-        .where(eq(users.id, id))
-        .returning();
-
-      if (!updated) {
-        throw new NotFoundException(`User with id ${id} not found`);
-      }
-
-      return updated;
-    } catch (error: unknown) {
-      if (error instanceof NotFoundException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to update user');
-    }
-  }
-
-  async remove(id: number) {
-    try {
-      const [deleted] = await this.database.db
-        .delete(users)
-        .where(eq(users.id, id))
-        .returning({ id: users.id });
-
-      if (!deleted) {
-        throw new NotFoundException(`User with id ${id} not found`);
-      }
-
-      return { deleted: true, id: deleted.id };
-    } catch (error: unknown) {
-      if (error instanceof NotFoundException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to delete user');
     }
   }
 }

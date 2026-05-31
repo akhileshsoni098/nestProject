@@ -1,6 +1,8 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
+import './types/express-augment';
+
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
