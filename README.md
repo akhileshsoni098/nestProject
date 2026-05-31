@@ -10,7 +10,7 @@
 2. [NestJS Architecture — 4 Pillars](#2-nestjs-architecture--4-pillars)
 3. [Project Structure — Har folder ka matlab](#3-project-structure--har-folder-ka-matlab)
 4. [File-by-file Explanation (Express comparison ke saath)](#4-file-by-file-explanation-express-comparison-ke-saath)
-5. [The Data Flow — Request ka safar](#5-the-data-flow--request-ka-safar)
+5. [The Complete Request Flow — 4 Scenarios](#5-the-complete-request-flow--4-scenarios)
 6. [Deep Dive: Why DTO?](#6-deep-dive-why-dto)
 7. [Deep Dive: Why Two DTOs? (RegisterDto vs CreateUserDto)](#7-deep-dive-why-two-dtos-registerdto-vs-createuserdto)
 8. [Deep Dive: Dependency Injection](#8-deep-dive-dependency-injection)
@@ -20,8 +20,9 @@
 12. [How to Run This Project](#12-how-to-run-this-project)
 13. [API Testing — Endpoints + Examples](#13-api-testing--endpoints--examples)
 14. [Common Mistakes (Express se aate hue)](#14-common-mistakes-express-se-aate-hue)
-15. [Next Steps — Kya aage seekhna hai](#15-next-steps--kya-aage-seekhna-hai)
-16. [NestJS Glossary — Har concept ek line mein](#16-nestjs-glossary--har-concept-ek-line-mein)
+15. [JWT Authentication + Middleware (Complete Deep Dive)](#15-jwt-authentication--middleware-complete-deep-dive)
+16. [Next Steps — Kya aage seekhna hai](#16-next-steps--kya-aage-seekhna-hai)
+17. [NestJS Glossary — Har concept ek line mein](#17-nestjs-glossary--har-concept-ek-line-mein)
 
 ---
 
@@ -185,10 +186,16 @@ my_first_project/
 │   │       ├── update-user.dto.ts #   PartialType — saare fields optional
 │   │       └── index.ts           #   Barrel export
 │   │
+│   ├── common/                    # 🛠️ Shared utilities
+│   │   └── filters/
+│   │       └── global-exception.filter.ts  # Global error handler
+│   │
 │   └── auth/                      # 🔐 Auth module (DELEGATOR)
-│       ├── auth.module.ts         #   imports UsersModule (UsersService access)
-│       ├── auth.controller.ts     #   POST /auth/register, POST /auth/login
-│       ├── auth.service.ts        #   UsersService ko call karta hai (DB direct nahi)
+│       ├── auth.module.ts         #   imports UsersModule + JwtModule
+│       ├── auth.controller.ts     #   POST /auth/register, POST /auth/login, GET /auth/profile
+│       ├── auth.service.ts        #   JWT sign + user create/validate + profile
+│       ├── auth.middleware.ts     #   🔒 JWT verify — Bearer token check
+│       ├── jwt-payload.interface.ts  # JWT payload type: { id }
 │       └── dto/
 │           ├── register.dto.ts    #   Registration form fields
 │           ├── login.dto.ts       #   Login form fields
@@ -408,13 +415,14 @@ Express mein tum khud types likhte ya `any` use karte.
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
-  @Post()     create(@Body() dto: CreateUserDto)          → POST   /users
-  @Get()      findAll()                                    → GET    /users
-  @Get(':id') findOne(@Param('id', ParseIntPipe) id)       → GET    /users/5
+  @Post()      create(@Body() dto: CreateUserDto)           → POST   /users
+  @Get(':id')  findOne(@Param('id', ParseIntPipe) id)       → GET    /users/5
   @Patch(':id') update(@Param('id', ParseIntPipe) id, @Body() dto) → PATCH /users/5
   @Delete(':id') remove(@Param('id', ParseIntPipe) id)     → DELETE /users/5
 }
 ```
+
+> **Note:** `GET /users` (findAll) currently removed. Sirf individual user operations available hain.
 
 **Express mein equivalent:**
 ```js
@@ -428,11 +436,6 @@ router.post('/', async (req, res) => {
   // Logic bhi yahi
   const user = await usersService.create(req.body);
   res.status(201).json(user);
-});
-
-router.get('/', async (req, res) => {
-  const users = await usersService.findAll();
-  res.json(users);
 });
 
 router.get('/:id', async (req, res) => {
@@ -540,7 +543,7 @@ app.post('/users', async (req, res) => {
 
 **Dhyan do:** NestJS mein `ConflictException`, `NotFoundException` auto 409/404 status code set kar dete hain. Express mein manually `res.status().json()` karna padta.
 
-### 4.8 `auth.controller.ts` + `auth.service.ts` — Authentication
+### 4.8 `auth.controller.ts` + `auth.service.ts` — Authentication + Profile
 
 ```ts
 // Controller
@@ -558,17 +561,28 @@ export class AuthController {
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
   }
+
+  @Get('profile')
+  profile(@Req() req: Request) {    // 🆕 Token se user ka ID nikalta hai
+    return this.authService.profile(req.user!.id);  // Middleware ne req.user set kiya
+  }
 }
 
 // Service
 @Injectable()
 export class AuthService {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
+  ) {}
 
   async register(dto: RegisterDto) {
     const createUserDto = new CreateUserDto();
     Object.assign(createUserDto, dto);  // RegisterDto → CreateUserDto (same fields)
-    return this.usersService.create(createUserDto);
+    const user = await this.usersService.create(createUserDto);
+    const token = this.jwtService.sign({ id: user.id });  // 🆕 JWT banaya
+    const { password: _, ...userWithoutPassword } = user;
+    return { user: userWithoutPassword, token };
   }
 
   async login(dto: LoginDto) {
@@ -578,7 +592,15 @@ export class AuthService {
     const isPasswordValid = await this.usersService.validatePassword(dto.password, user.password);
     if (!isPasswordValid) throw new UnauthorizedException('Invalid credentials');
 
-    return user;
+    const token = this.jwtService.sign({ id: user.id });  // 🆕 JWT banaya
+    const { password: _, ...userWithoutPassword } = user;
+    return { user: userWithoutPassword, token };
+  }
+
+  async profile(userId: number) {  // 🆕 Profile method
+    const user = await this.usersService.findOne(userId);
+    const { password: _, ...userWithoutPassword } = user;
+    return userWithoutPassword;
   }
 }
 ```
@@ -587,8 +609,10 @@ export class AuthService {
 ```js
 // Express — saara logic ek route mein
 app.post('/auth/register', async (req, res) => {
-  const user = await usersService.create(req.body);  // Direct call
-  res.status(201).json(user);
+  const user = await usersService.create(req.body);
+  const token = jwt.sign({ id: user.id }, SECRET);
+  const { password, ...userWithoutPassword } = user;
+  res.status(201).json({ user: userWithoutPassword, token });
 });
 
 app.post('/auth/login', async (req, res) => {
@@ -596,11 +620,19 @@ app.post('/auth/login', async (req, res) => {
   if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
+  const token = jwt.sign({ id: user.id }, SECRET);
+  const { password, ...userWithoutPassword } = user;
+  res.json({ user: userWithoutPassword, token });
+});
+
+// Profile — Express mein manually middleware + route
+app.get('/auth/profile', authMiddleware, (req, res) => {
+  const user = usersService.findOne(req.user.id);
   res.json(user);
 });
 ```
 
-**Key difference:** AuthService `UsersService` ko call kar raha hai, DB ko direct nahi. Agar future mein tum JWT add karo ge, to sirf `AuthService` badlegi, `UsersService` nahi.
+**Key difference:** AuthService `UsersService` ko call kar raha hai, DB ko direct nahi. Profile ke liye token se ID aati hai (`req.user.id`), URL param se nahi.
 
 ### 4.9 DTOs — Validation Classes
 
@@ -646,11 +678,168 @@ export class LoginDto {
 
 ---
 
-## 5. The Data Flow — Request ka safar
+## 5. The Complete Request Flow — 4 Scenarios
 
-Jab koi request aati hai, to Express aur NestJS mein kaise travel karti hai?
+> **Express mein:** Sab kuch ek route handler mein hota tha. Request aayi → tumne handle kiya → response bheja.
+> **NestJS mein:** Request kai layers se guzarti hai — Middleware → Controller → Service → Database → wapas.
 
-### Express Data Flow
+Neeche 4 scenarios hain jo pure project ka flow dikhate hain:
+
+---
+
+### Scenario 1: REGISTER (POST /auth/register) — Bina token ke
+
+```
+REQUEST: POST /auth/register  { fname, lname, email, password, role }
+  │
+  ├─ 1. Middleware Check ──────────────
+  │     POST /auth/register → EXCLUDE list mein hai → middleware skip!
+  │     (Kyunki register/login ke liye token nahi hota)
+  │
+  ├─ 2. ValidationPipe ────────────────
+  │     @Body() dto: RegisterDto
+  │     → @IsEmail() ✓  @IsString() ✓  @IsNotEmpty() ✓
+  │     → Agar kuch galat → 400 Bad Request (msg: "email must be an email")
+  │     → Extra fields (jaise isAdmin) → auto remove (whitelist)
+  │
+  ├─ 3. AuthController.register() ────
+  │     Sirde route handle → authService.register(dto) ko call
+  │
+  ├─ 4. AuthService.register() ───────
+  │     a. RegisterDto → CreateUserDto convert (fields map)
+  │     b. usersService.create(createUserDto) ko call
+  │     c. JWT token banaya: jwtService.sign({ id: user.id })
+  │     d. Password exclude: { password: _, ...userWithoutPassword }
+  │     e. Return: { user: userWithoutPassword, token }
+  │
+  ├─ 5. UsersService.create() ────────
+  │     a. Email duplicate check (DB query)
+  │     b. bcrypt.hash(password, 10)
+  │     c. DB INSERT via Drizzle ORM
+  │     d. Return created user
+  │
+  └─ 6. Response ─────────────────────
+        201 Created
+        { "user": { "id":1, "fname":"Rahul", ... }, "token": "eyJ..." }
+```
+
+---
+
+### Scenario 2: LOGIN (POST /auth/login) — Bina token ke
+
+```
+REQUEST: POST /auth/login  { email, password }
+  │
+  ├─ 1. Middleware Check ──────────────
+  │     POST /auth/login → EXCLUDE list mein hai → middleware skip!
+  │
+  ├─ 2. ValidationPipe ────────────────
+  │     @Body() dto: LoginDto → @IsEmail() @IsString() @IsNotEmpty()
+  │
+  ├─ 3. AuthController.login() ───────
+  │     @HttpCode(HttpStatus.OK) → 200 return karega (default 201 nahi)
+  │
+  ├─ 4. AuthService.login() ──────────
+  │     a. UsersService.findByEmail(dto.email)
+  │     b. User nahi mila → 401 UnauthorizedException
+  │     c. UsersService.validatePassword(dto.password, user.password)
+  │     d. Password galat → 401 UnauthorizedException
+  │     e. JWT token: jwtService.sign({ id: user.id })
+  │     f. Password exclude
+  │     g. Return: { user: userWithoutPassword, token }
+  │
+  └─ 6. Response ─────────────────────
+        200 OK
+        { "user": { "id":1, "fname":"Rahul", ... }, "token": "eyJ..." }
+```
+
+---
+
+### Scenario 3: PROFILE (GET /auth/profile) — Token REQUIRED
+
+```
+REQUEST: GET /auth/profile
+  Header: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJpZCI6MX0...
+  │
+  ├─ 1. Middleware Check ──────────────
+  │     GET /auth/profile → EXCLUDE nahi hai (sirf POST register/login exclude)
+  │     → AuthMiddleware.use() run hota hai:
+  │     a. Header se "Bearer ..." extract
+  │     b. jwtService.verify(token) → { id: 1 }
+  │     c. req.user = { id: 1 }
+  │     d. next() → controller pass
+  │
+  ├─ 2. AuthController.profile() ─────
+  │     @Req() req: Request → req.user!.id = 1
+  │     authService.profile(1) ko call
+  │
+  ├─ 3. AuthService.profile(1) ───────
+  │     a. UsersService.findOne(1) ko call
+  │     b. Password exclude
+  │     c. Return user without password
+  │
+  ├─ 4. UsersService.findOne(1) ──────
+  │     a. DB SELECT * FROM users WHERE id = 1
+  │     b. User nahi mila → 404 NotFoundException
+  │     c. Return user
+  │
+  └─ 5. Response ─────────────────────
+        200 OK
+        { "id":1, "fname":"Rahul", "email":"rahul@test.com", "role":"student", ... }
+        (No password, no token — sirf user data)
+```
+
+---
+
+### Scenario 4: PROTECTED ROUTE (e.g. GET /users/1, PATCH /users/1) — Token REQUIRED
+
+```
+REQUEST: PATCH /users/1  { "fname": "Rahul Kumar" }
+  Header: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJpZCI6MX0...
+  │
+  ├─ 1. Middleware ────────────────────
+  │     AuthMiddleware: token verify → req.user = { id: 1 } → next()
+  │
+  ├─ 2. ValidationPipe ───────────────
+  │     @Body() dto: UpdateUserDto → PartialType → sab optional
+  │
+  ├─ 3. UsersController.update(1, dto)
+  │
+  ├─ 4. UsersService.update(1, dto) ──
+  │     a. Sirf wahi fields SET karo jo di gayi (fname)
+  │     b. DB UPDATE users SET fname = 'Rahul Kumar', updatedAt = NOW() WHERE id = 1
+  │     c. User nahi mila → 404 NotFoundException
+  │
+  └─ 5. Response ─────────────────────
+        200 OK
+        { "id":1, "fname":"Rahul Kumar", ... }
+```
+
+---
+
+### Visual Dependency Tree (Updated)
+
+```
+AppModule
+  │
+  ├── ConfigModule.forRoot()     ← .env file load
+  │
+  ├── DatabaseModule (@Global)
+  │   └── DatabaseService        ← sirf ek baar bana, saari jagah same instance
+  │
+  ├── UsersModule
+  │   ├── schema.ts        ─── Users table definition (module-wise schema)
+  │   ├── UsersController  ─── routes: POST/GET:PATCH/DELETE /users
+  │   ├── UsersService     ─── business logic (injects DatabaseService)
+  │   └── exports: [UsersService]  ← AuthModule ke liye available
+  │
+  ├── AuthModule
+  │   ├── imports: [UsersModule]  ← taaki UsersService use kar sake
+  │   ├── AuthController ─── routes: POST /auth/register, POST /auth/login, GET /auth/profile
+  │   ├── AuthService     ─── authentication + profile logic
+  │   └── AuthMiddleware  ─── JWT verify (app.module.ts mein apply)
+  │
+  └── AppController + AppService  ← Hello World
 ```
 REQUEST
   │
@@ -1189,18 +1378,20 @@ curl -X POST http://localhost:3001/auth/register \
 **Success Response (201):**
 ```json
 {
-  "id": 1,
-  "fname": "Rahul",
-  "lname": "Sharma",
-  "email": "rahul@test.com",
-  "password": "$2b$10$...",
-  "role": "student",
-  "createdAt": "2025-01-01T00:00:00.000Z",
-  "updatedAt": "2025-01-01T00:00:00.000Z"
+  "user": {
+    "id": 1,
+    "fname": "Rahul",
+    "lname": "Sharma",
+    "email": "rahul@test.com",
+    "role": "student",
+    "createdAt": "2025-01-01T00:00:00.000Z",
+    "updatedAt": "2025-01-01T00:00:00.000Z"
+  },
+  "token": "eyJhbGciOiJIUzI1NiJ9.eyJpZCI6MX0..."
 }
 ```
 
-> ⚠️ **Note:** Password response mein aa raha hai. JWT implement karte waqt isko nahi bhejna chahiye.
+> ✅ **Password response mein nahi hai.** `const { password: _, ...userWithoutPassword } = user` se exclude kiya.
 
 **Duplicate Email (409):**
 ```json
@@ -1229,24 +1420,37 @@ curl -X POST http://localhost:3001/auth/login \
 
 **Success (200):**
 ```json
-{ "id": 1, "fname": "Rahul", ... }
-```
+{
+  "user": { "id": 1, "fname": "Rahul", ... },
+  "token": "eyJhbGciOiJIUzI1NiJ9.eyJpZCI6MX0..."
+}
 
 **Invalid credentials (401):**
 ```json
 { "message": "Invalid credentials", "error": "Unauthorized", "statusCode": 401 }
 ```
 
-### Get All Users
+### Get Profile (Logged-in User)
 
 ```bash
-curl http://localhost:3001/users
+curl http://localhost:3001/auth/profile \
+  -H "Authorization: Bearer <token>"
 ```
 
 **Response (200):**
 ```json
-[{ "id": 1, "fname": "Rahul", ... }]
+{
+  "id": 1,
+  "fname": "Rahul",
+  "lname": "Sharma",
+  "email": "rahul@test.com",
+  "role": "student",
+  "createdAt": "2025-01-01T00:00:00.000Z",
+  "updatedAt": "2025-01-01T00:00:00.000Z"
+}
 ```
+
+> **Notice:** Profile endpoint mein `id` nahi dena padta URL mein. Token se automatically pata chal jata hai kaun hai user. No password in response.
 
 ### Get User By ID
 
@@ -1341,58 +1545,216 @@ async findOne(id: number) {
 }
 ```
 
-### ❌ Password in response
+### ❌ Password in response (Now Fixed ✅)
 
-Abhi password response mein aa raha hai. Express mein bhi tum `res.json(user)` karte to password chhupana bhool jaate. NestJS mein bhi same cheez.
+Pehle register/login pure user object return kar rahe the (password included). Ab JWT implementation mein `const { password: _, ...userWithoutPassword } = user` se password exclude hota hai. Express mein bhi tum `res.json(user)` karte to password chhupana bhool jaate.
 
 ---
 
-## 15. Next Steps — Kya aage seekhna hai
+## 15. JWT Authentication + Middleware (Complete Deep Dive)
 
-### 1️⃣ Add ValidationPipe in main.ts
+### Kya implement kiya?
+
+```
+REGISTER         → { user (without password), token }
+LOGIN            → { user (without password), token }
+GET /auth/profile → { user (without password) }    ← Token se ID
+PROTECTED ROUTES  → Middleware se guard
+```
+
+### 15.1 Files created
+
+| File | Kya hai? |
+|---|---|
+| `src/auth/jwt-payload.interface.ts` | `JwtPayload` type: sirf `{ id: number }` |
+| `src/auth/auth.middleware.ts` | Middleware — token verify + `req.user` attach |
+| `src/@types/express.d.ts` | Express `Request` type extend — `req.user` TypeScript ko bataye |
+
+### 15.2 Files modified
+
+| File | Kya hua? |
+|---|---|
+| `.env` | `JWT_SECRET=my_super_secret_key_2026` add |
+| `src/auth/auth.module.ts` | `JwtModule.register({ global: true, secret })` — global JWT service |
+| `src/auth/auth.service.ts` | `jwtService.sign({ id })` in register + login, `profile()` method add, password exclude |
+| `src/auth/auth.controller.ts` | 🆕 `@Get('profile')` — uses `req.user!.id` from middleware |
+| `src/app.module.ts` | `NestModule` implement — middleware apply, sirf `POST /auth/register` + `POST /auth/login` exclude |
+
+### 15.3 Middleware Exclusion — Important Change ⚠️
+
+**Pehle (galat):** `auth/(.*)` — saare auth routes exclude the
+```ts
+// ❌ Yeh profile ko bhi bypass kar deta
+.exclude('auth/(.*)')
+.forRoutes('*');
+```
+
+**Ab (sahi):** Sirf specific POST routes exclude
+```ts
+// ✅ POST register/login ko skip, GET /auth/profile middleware se guard
+.exclude(
+  { path: 'auth/register', method: RequestMethod.POST },
+  { path: 'auth/login', method: RequestMethod.POST },
+)
+.forRoutes('*');
+```
+
+**Kyun?** — `GET /auth/profile` ko bhi token chahiye. Isliye `auth/(.*)` nahi likh sakte.
+
+### 15.4 `auth.service.ts` — JWT sign kaise kiya?
 
 ```ts
-import { ValidationPipe } from '@nestjs/common';
+// Register
+const user = await this.usersService.create(createUserDto);
+const token = this.jwtService.sign({ id: user.id });  // payload: sirf id
+const { password: _, ...userWithoutPassword } = user;  // password hatao
+return { user: userWithoutPassword, token };
 
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true,              // Extra fields auto remove
-    forbidNonWhitelisted: true,   // Extra fields par error
-    transform: true,              // Auto type conversion (string → number, etc.)
-  }));
+// Login
+const user = await this.usersService.findByEmail(dto.email);
+// validate password...
+const token = this.jwtService.sign({ id: user.id });
+const { password: _, ...userWithoutPassword } = user;
+return { user: userWithoutPassword, token };
 
-  await app.listen(process.env.PORT ?? 3000);
+// Profile — token se ID aati hai, URL param se nahi
+async profile(userId: number) {
+  const user = await this.usersService.findOne(userId);
+  const { password: _, ...userWithoutPassword } = user;
+  return userWithoutPassword;  // Sirf user data, no token
 }
 ```
 
-`whitelist: true` ka matlab:
-- Agar request mein extra field hai (jo DTO mein nahi), to use auto hata do
-- Jaise koi bhejde `{ fname: "Rahul", isAdmin: true }` — `isAdmin` hata diya jayega
+**Payload structure:** `{ id: 1 }` — sirf user ka ID. No expiry time.
 
-### 2️⃣ JWT Authentication
+### 15.5 Middleware — `auth.middleware.ts`
 
-```bash
-npm install @nestjs/jwt @nestjs/passport passport passport-jwt
+**Express ka middleware vs NestJS ka middleware — exact same concept:**
+
+```ts
+// Express middleware (purana tareeka)
+app.use('/api', (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  const decoded = jwt.verify(token, SECRET);
+  req.user = decoded;
+  next();
+});
+
+// NestJS middleware (class-based, same baat)
+@Injectable()
+export class AuthMiddleware implements NestMiddleware {
+  constructor(private readonly jwtService: JwtService) {}
+
+  use(req: Request, res: Response, next: NextFunction) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Token is required');
+    }
+    const token = authHeader.split(' ')[1];
+    const decoded = this.jwtService.verify<{ id: number }>(token);
+    req.user = decoded;   // ab req.user har jagah available
+    next();
+  }
+}
 ```
 
-- Login par JWT token return karo
-- `@AuthGuard()` se protected routes banao
-- Password ko response mein mat bhejo
+**Kya ho raha hai step by step (Profile ke example se):**
 
-### 3️⃣ Role-Based Access
+```
+Request aayi: GET /auth/profile
+  Header: Authorization: Bearer eyJhbG...
+  │
+  ▼
+AuthMiddleware.use()   ← Middleware run hua (exclude nahi hai)
+  │
+  ├── 1. Header check: "Bearer eyJhbG..." → OK
+  ├── 2. Token extract: "eyJhbG..."
+  ├── 3. jwtService.verify(token) → { id: 1, iat: 1748640000 }
+  ├── 4. req.user = { id: 1 }
+  └── 5. next() → controller pe pahuncha
+  │
+  ▼
+AuthController.profile(@Req() req)
+  └── req.user!.id → 1
+      │
+      ▼
+  AuthService.profile(1)
+      └── UsersService.findOne(1)
+          └── DB SELECT * FROM users WHERE id = 1
+```
 
-- `@Roles('admin')` decorator banao
-- Guard check kare ki user ke role mein access hai ya nahi
+### 15.6 Middleware apply — `app.module.ts`
 
-### 4️⃣ Password Hiding
+```ts
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(AuthMiddleware)
+      .exclude(
+        { path: 'auth/register', method: RequestMethod.POST },
+        { path: 'auth/login', method: RequestMethod.POST },
+      )
+      .forRoutes('*');
+  }
+}
+```
 
-Response mein password na aaye, iske liye:
-- DTO mein `@Exclude()` decorator use karo (class-transformer se)
-- Ya manually `delete user.password`
+**Express mein equivalent:**
 
-### 5️⃣ Drizzle Migrations
+```js
+// Express — same logic
+app.use((req, res, next) => {
+  if (req.method === 'POST' && (req.path === '/auth/register' || req.path === '/auth/login')) {
+    return next();  // exclude specific routes
+  }
+  // verify token...
+  next();
+});
+```
+
+### 15.7 Protected routes — kaise test karein?
+
+**Bina token ke:**
+```bash
+curl http://localhost:3001/auth/profile
+# 401: { "message": "Token is required", "error": "Unauthorized", "statusCode": 401 }
+```
+
+**Sahi token ke saath:**
+```bash
+# Pehle login karo, token copy karo
+curl -X POST http://localhost:3001/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{ "email": "rahul@test.com", "password": "secret123" }'
+
+# Response mein token milega
+# Token ko use karo:
+curl http://localhost:3001/auth/profile \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJpZCI6MX0.abc..."
+
+# Response: { "id":1, "fname":"Rahul", "email":"rahul@test.com", ... }
+```
+
+### 15.8 Response Comparison
+
+| Endpoint | Response |
+|---|---|
+| `POST /auth/register` | `{ "user": {...}, "token": "eyJ..." }` |
+| `POST /auth/login` | `{ "user": {...}, "token": "eyJ..." }` |
+| `GET /auth/profile` | `{ "id":1, "fname":"Rahul", ... }` — sirf user, no token |
+
+**Password teeno mein nahi hai.** Har jagah destructure kiya: `const { password: _, ...userWithoutPassword } = user`.
+
+---
+
+## 16. Next Steps — Kya aage seekhna hai
+
+### 1️⃣ Role-Based Access
+
+- `@Roles('admin')` guard banao
+- Middleware ke baad Guard check kare ki user ke role mein access hai ya nahi
+
+### 2️⃣ Drizzle Migrations
 
 ```bash
 npx drizzle-kit generate   # Migration files banao
@@ -1402,7 +1764,7 @@ npx drizzle-kit push       # Direct push (dev ke liye)
 
 ---
 
-## 16. NestJS Glossary — Har concept ek line mein
+## 17. NestJS Glossary — Har concept ek line mein
 
 | Concept | Express Equivalent | Explanation |
 |---|---|---|
@@ -1413,7 +1775,7 @@ npx drizzle-kit push       # Direct push (dev ke liye)
 | **DTO** | `req.body` manual parse | Request body ka shape + validation. `class-validator` decorators |
 | **Pipe** | `parseInt()` / manual validation | Data transform + validate. Jaise `ParseIntPipe`, `ValidationPipe` |
 | **Guard** | Middleware (auth check) | Request allow ya deny karta hai |
-| **Middleware** | `app.use()` | Request/response modify karta hai |
+| **Middleware** | `app.use()` | Request/response modify karta hai. `NestMiddleware` implement |
 | **Interceptor** | — | Response transform, logging, etc. |
 | **Decorator** | — | `@` se shuru — metadata attach karta hai |
 | **Dependency Injection** | `new Service()` manually | NestJS auto dependencies provide karta hai |
@@ -1421,6 +1783,8 @@ npx drizzle-kit push       # Direct push (dev ke liye)
 | **`@Global()`** | — | Module ko global scope deta hai — import ki zaroorat nahi |
 | **`PartialType`** | Spread operator (`...`) | Saare fields optional bana deta hai |
 | **`ParseIntPipe`** | `parseInt(req.params.id)` | String → Number, fail ho to 400 error |
+| **`JwtService`** | `jsonwebtoken` library | `sign()` token banata hai, `verify()` token check karta hai |
+| **`NestMiddleware`** | Express middleware | `use(req, res, next)` — request intercept karta hai |
 
 ---
 
@@ -1442,10 +1806,14 @@ npx drizzle-kit push       # Direct push (dev ke liye)
 | `users/dto/create-user.dto.ts` | Validation for create | Manual if-else |
 | `users/dto/update-user.dto.ts` | Validation for update | Manual if-else per field |
 | `auth/auth.module.ts` | Auth module definition | Kuch nahi |
-| `auth/auth.controller.ts` | POST /auth/register, /auth/login | `app.post('/auth/register')` |
-| `auth/auth.service.ts` | Auth logic (delegates to UsersService) | Route mein hi likhte |
+| `auth/auth.controller.ts` | POST /auth/register, /auth/login, GET /auth/profile | `app.post('/auth/register')` |
+| `auth/auth.service.ts` | Auth logic + JWT sign + profile | Route mein hi likhte |
+| `auth/auth.middleware.ts` | JWT verify middleware | `app.use('/api', authMiddleware)` |
+| `auth/jwt-payload.interface.ts` | JWT payload type `{ id }` | Koi equivalent nahi |
 | `auth/dto/register.dto.ts` | Registration validation | Manual |
 | `auth/dto/login.dto.ts` | Login validation | Manual |
+| `common/filters/global-exception.filter.ts` | Global error handler | Express error middleware |
+| `@types/express.d.ts` | `req.user` type declaration | Koi equivalent nahi |
 
 ---
 

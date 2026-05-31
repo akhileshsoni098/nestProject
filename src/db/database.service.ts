@@ -1,4 +1,10 @@
-import { Injectable, OnModuleDestroy, OnModuleInit, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleDestroy,
+  OnModuleInit,
+  Logger,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool, Client } from 'pg';
 import * as schema from './schema';
@@ -10,20 +16,27 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private dbInstance!: ReturnType<typeof drizzle<typeof schema>>;
 
   async onModuleInit() {
-    const connectionString = process.env.DATABASE_URL;
+    try {
+      const connectionString = process.env.DATABASE_URL;
 
-    if (!connectionString) {
-      throw new Error('DATABASE_URL is not set');
+      if (!connectionString) {
+        throw new Error('DATABASE_URL is not set');
+      }
+
+      const dbName = this.extractDbName(connectionString);
+
+      await this.ensureDatabaseExists(connectionString, dbName);
+
+      this.pool = new Pool({ connectionString });
+      this.dbInstance = drizzle(this.pool, { schema });
+
+      this.logger.log(`Connected to database "${dbName}" successfully.`);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Database initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+      throw new InternalServerErrorException('Database connection failed');
     }
-
-    const dbName = this.extractDbName(connectionString);
-
-    await this.ensureDatabaseExists(connectionString, dbName);
-
-    this.pool = new Pool({ connectionString });
-    this.dbInstance = drizzle(this.pool, { schema });
-
-    this.logger.log(`Connected to database "${dbName}" successfully.`);
   }
 
   private extractDbName(connectionString: string): string {
@@ -32,7 +45,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return dbName || 'postgres';
   }
 
-  private async ensureDatabaseExists(connectionString: string, dbName: string): Promise<void> {
+  private async ensureDatabaseExists(
+    connectionString: string,
+    dbName: string,
+  ): Promise<void> {
     const url = new URL(connectionString);
     url.pathname = '/postgres';
 
@@ -53,6 +69,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       } else {
         this.logger.log(`Database "${dbName}" already exists.`);
       }
+    } catch (error: unknown) {
+      this.logger.error(
+        `Failed to ensure database exists: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+      throw error;
     } finally {
       await client.end();
     }
@@ -63,9 +84,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    if (this.pool) {
-      await this.pool.end();
-      this.logger.log('Database connection closed.');
+    try {
+      if (this.pool) {
+        await this.pool.end();
+        this.logger.log('Database connection closed.');
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        `Failed to close database connection: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
     }
   }
 }
