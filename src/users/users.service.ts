@@ -6,7 +6,7 @@ import {
 import * as bcrypt from 'bcrypt';
 import { eq } from 'drizzle-orm';
 import { DatabaseService } from '../db/database.service';
-import { users } from '../db/schema';
+import { users } from './schema';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 

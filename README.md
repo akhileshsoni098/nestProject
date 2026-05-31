@@ -173,12 +173,13 @@ my_first_project/
 │   ├── db/                        # 🗄️ Database module (GLOBAL)
 │   │   ├── database.module.ts     #   @Global() — kisi ko import nahi karna padta
 │   │   ├── database.service.ts    #   PostgreSQL pool + Drizzle instance
-│   │   └── schema.ts              #   Table definitions
+│   │   └── schema.ts              #   Barrel re-export (aggregates all module schemas)
 │   │
 │   ├── users/                     # 👤 Users module (DATA OWNER)
 │   │   ├── users.module.ts        #   exports UsersService taaki Auth use kare
 │   │   ├── users.controller.ts    #   CRUD routes — GET/POST/PATCH/DELETE /users
 │   │   ├── users.service.ts       #   Saari user DB logic yahan
+│   │   ├── schema.ts              #   🆕 Table definitions (module-wise schema!)
 │   │   └── dto/
 │   │       ├── create-user.dto.ts #   Validation: new user ke liye
 │   │       ├── update-user.dto.ts #   PartialType — saare fields optional
@@ -347,8 +348,11 @@ app.get('/users', async (req, res) => {
 - `OnModuleDestroy` — App band hote hi `onModuleDestroy()` call karega. Yahan pool close karo.
 - `private pool!: Pool` — `!` ka matlab: "TypeScript, yeh property runtime mein initialize hogi, error mat do"
 
-### 4.5 `schema.ts` — Table Definition (Drizzle ORM)
+### 4.5 `schema.ts` — Module-wise Table Definition (Drizzle ORM)
 
+**Naya pattern — Module-wise Schema:** Har module apni table definition khud rakhta hai.
+
+**`src/users/schema.ts`** — Users table ki actual definition yahan hai:
 ```ts
 export const userRoleEnum = pgEnum('user_role', ['student', 'admin']);
 
@@ -365,6 +369,19 @@ export const users = pgTable('users', {
   emailIdx: uniqueIndex('users_email_unique_idx').on(table.email),
 }));
 ```
+
+**`src/db/schema.ts`** — Sirf re-export karta hai (aggregator):
+```ts
+export * from '../users/schema';
+// Future: export * from '../products/schema';
+// Future: export * from '../orders/schema';
+```
+
+**Kyun module-wise?**
+- Har module apni table definition khud rakhta hai — **Single Responsibility**
+- Naya module add karo → uski schema usi folder mein → `db/schema.ts` mein export add karo
+- `database.service.ts` sirf `db/schema.ts` se import karta hai — usse farak nahi padta
+- `drizzle.config.ts` sirf actual schema files ko point karta hai
 
 **Express mein equivalent:**
 ```sql
@@ -709,6 +726,7 @@ AppModule
   │   └── DatabaseService        ← sirf ek baar bana, saari jagah same instance
   │
   ├── UsersModule
+  │   ├── schema.ts        ─── Users table definition (module-wise schema)
   │   ├── UsersController  ─── routes: GET/POST/PATCH/DELETE /users
   │   ├── UsersService     ─── business logic (injects DatabaseService)
   │   └── exports: [UsersService]  ← AuthModule ke liye available
@@ -1022,6 +1040,8 @@ bcrypt.compare("secret123", "$2b$10$XQx...")
 ---
 
 ## 11. Database Schema — Table ka design
+
+**Location:** `src/users/schema.ts` (module-wise — users module apni schema khud rakhta hai)
 
 ```ts
 export const userRoleEnum = pgEnum('user_role', ['student', 'admin']);
@@ -1414,7 +1434,8 @@ npx drizzle-kit push       # Direct push (dev ke liye)
 | `app.service.ts` | Hello World logic | Route mein hi likhte |
 | `db/database.module.ts` | DB connection (global) | Ek alag `db.js` file |
 | `db/database.service.ts` | Pool + Drizzle instance | `new Pool()` + export |
-| `db/schema.ts` | Table definition | SQL migration files |
+| `db/schema.ts` | Schema aggregator (re-exports module schemas) | Kuch nahi |
+| `users/schema.ts` | ✅ Users table definition (module-wise) | SQL migration files |
 | `users/users.module.ts` | User module definition | Kuch nahi |
 | `users/users.controller.ts` | CRUD routes /users | `express.Router()` |
 | `users/users.service.ts` | User business logic | Route mein ya helper mein |
